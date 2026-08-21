@@ -1,0 +1,23 @@
+name: Cloud Intraday CPR Scanner
+
+on:
+  schedule:
+    # Runs Mon-Fri every 15 mins during NSE hours (09:15 AM - 03:30 PM IST)
+    - cron: '*/15 3-10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Execute Scanner
+        run: |
+          python scanner.py
