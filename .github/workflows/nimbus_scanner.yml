@@ -1,1 +1,21 @@
+name: Nimbus Market Scanner
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 3-6 * * 1-5'
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Execute Nimbus Scanner
+        run: python bot.py
