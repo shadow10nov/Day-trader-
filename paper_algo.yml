@@ -1,0 +1,32 @@
+name: Paper Algo
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '40 3 * * 1-5'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Libraries
+        run: pip install -r requirements.txt
+
+      - name: Run Trading Engine
+        env:
+          FYERS_ID: ${{ secrets.FYERS_ID }}
+          APP_ID: ${{ secrets.APP_ID }}
+          PIN: ${{ secrets.PIN }}
+          TOTP_KEY: ${{ secrets.TOTP_KEY }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
