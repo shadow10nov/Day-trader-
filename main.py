@@ -1,5 +1,4 @@
 import os
-import base64
 import time
 from datetime import datetime, timedelta
 import urllib.parse
@@ -9,19 +8,16 @@ import requests
 from urllib.parse import parse_qs, urlparse
 from fyers_apiv3 import fyersModel
 
-# GitHub Secrets se encrypted fetch
-FYERS_ID           = os.environ["FYERS_ID"]
-APP_ID             = os.environ["APP_ID"]
-PIN                = os.environ["PIN"]
-TOTP_KEY           = os.environ["TOTP_KEY"]
-SECRET_KEY         = os.environ["SECRET_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+FYERS_ID           = os.environ["FYERS_ID"].strip()
+APP_ID             = os.environ["APP_ID"].strip()
+PIN                = os.environ["PIN"].strip()
+TOTP_KEY           = os.environ["TOTP_KEY"].strip()
+SECRET_KEY         = os.environ["SECRET_KEY"].strip()
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"].strip()
 REDIRECT_URI       = "https://trade.fyers.in/api-login/redirect-uri/index.html"
 
-SYMBOL        = "NSE:SBIN-EQ"
-QUANTITY      = 1
-PAPER_TRADING = True  # Paper Trading Active
+SYMBOL = "NSE:SBIN-EQ"
 
 def send_telegram_alert(message):
     try:
@@ -36,23 +32,35 @@ def send_telegram_alert(message):
 
 print("Connecting to Fyers API...")
 session = requests.Session()
-encoded_id = base64.b64encode(FYERS_ID.encode("utf-8")).decode("utf-8")
-encoded_pin = base64.b64encode(PIN.encode("utf-8")).decode("utf-8")
 
-r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json={"fy_id": encoded_id, "app_id": "2"}).json()
+# 1. Send OTP Request
+r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp", json={"fy_id": FYERS_ID, "app_id": "2"}).json()
 if "request_key" not in r1:
-    print("OTP Request Failed:", r1)
+    # Fallback to alternative payload
+    r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json={"fy_id": FYERS_ID, "app_id": "2"}).json()
+
+if "request_key" not in r1:
+    print(f"OTP Request Failed: {r1}")
     exit(1)
 
+# 2. Verify TOTP
 otp_val = pyotp.TOTP(TOTP_KEY).now()
-r2 = session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json={"request_key": r1["request_key"], "otp": otp_val}).json()
+r2 = session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json={"request_key": r1["request_key"], "otp": str(otp_val)}).json()
 if "request_key" not in r2:
-    print("TOTP Verification Failed:", r2)
+    print(f"TOTP Verification Failed: {r2}")
     exit(1)
 
-r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": encoded_pin}).json()
-token_temp = r3.get("data", {}).get("token") or r3.get("data", {}).get("access_token") or r3.get("access_token")
+# 3. Verify PIN
+r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": PIN}).json()
+if "data" not in r3 and "access_token" not in r3:
+    r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": PIN}).json()
 
+token_temp = r3.get("data", {}).get("token") or r3.get("data", {}).get("access_token") or r3.get("access_token")
+if not token_temp:
+    print(f"PIN Verification Failed: {r3}")
+    exit(1)
+
+# 4. Generate Auth Code & Token
 app_id_clean = APP_ID.split("-")[0] if "-" in APP_ID else APP_ID
 app_type = APP_ID.split("-")[1] if "-" in APP_ID else "100"
 
@@ -94,7 +102,6 @@ def get_fyers_candles():
 start_loop = time.time()
 trade_taken = False
 
-# Maximum 2 hours execution per run
 while time.time() - start_loop < 7200 and not trade_taken:
     try:
         bars = get_fyers_candles()
