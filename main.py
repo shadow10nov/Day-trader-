@@ -35,43 +35,45 @@ print("Connecting to Fyers API...")
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json',
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json; charset=UTF-8'
 })
 
-# 1. Send OTP Request (Base64 Encoded FY_ID)
-encoded_fy_id = base64.b64encode(FYERS_ID.encode()).decode()
-r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json={"fy_id": encoded_fy_id, "app_id": "2"}).json()
+# Step 1: Send Login OTP
+res_otp = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp", json={"fy_id": FYERS_ID, "app_id": "2"}).json()
+if "request_key" not in res_otp:
+    # Try Base64 encoded fy_id
+    encoded_fy_id = base64.b64encode(FYERS_ID.encode("utf-8")).decode("utf-8")
+    res_otp = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp", json={"fy_id": encoded_fy_id, "app_id": "2"}).json()
 
-if "request_key" not in r1:
-    # Try alternate plain string payload
-    r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json={"fy_id": FYERS_ID, "app_id": "2"}).json()
-
-if "request_key" not in r1:
-    print("OTP Request Failed:", r1)
+if "request_key" not in res_otp:
+    print(f"OTP Request Failed: {res_otp}")
     exit(1)
 
-# 2. Verify TOTP
+request_key = res_otp["request_key"]
+
+# Step 2: Verify TOTP
 otp_val = pyotp.TOTP(TOTP_KEY).now()
-r2 = session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json={"request_key": r1["request_key"], "otp": str(otp_val)}).json()
-if "request_key" not in r2:
-    print("TOTP Verification Failed:", r2)
+res_totp = session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json={"request_key": request_key, "otp": str(otp_val)}).json()
+if "request_key" not in res_totp:
+    print(f"TOTP Verification Failed: {res_totp}")
     exit(1)
 
-# 3. Verify PIN (Base64 Encoded PIN)
-encoded_pin = base64.b64encode(PIN.encode()).decode()
-r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": encoded_pin}).json()
-token_temp = r3.get("data", {}).get("token") or r3.get("data", {}).get("access_token") or r3.get("access_token")
+request_key_2 = res_totp["request_key"]
+
+# Step 3: Verify PIN
+encoded_pin = base64.b64encode(PIN.encode("utf-8")).decode("utf-8")
+res_pin = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin", json={"request_key": request_key_2, "identity_type": "pin", "identifier": encoded_pin}).json()
+
+token_temp = res_pin.get("data", {}).get("token") or res_pin.get("data", {}).get("access_token") or res_pin.get("access_token")
+if not token_temp:
+    res_pin = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin", json={"request_key": request_key_2, "identity_type": "pin", "identifier": PIN}).json()
+    token_temp = res_pin.get("data", {}).get("token") or res_pin.get("data", {}).get("access_token") or res_pin.get("access_token")
 
 if not token_temp:
-    r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": PIN}).json()
-    token_temp = r3.get("data", {}).get("token") or r3.get("data", {}).get("access_token") or r3.get("access_token")
-
-if not token_temp:
-    print("PIN Verification Failed:", r3)
+    print(f"PIN Verification Failed: {res_pin}")
     exit(1)
 
-# 4. Generate Auth Code & Access Token
+# Step 4: Generate Auth Code & Token
 app_id_clean = APP_ID.split("-")[0] if "-" in APP_ID else APP_ID
 app_type = APP_ID.split("-")[1] if "-" in APP_ID else "100"
 
