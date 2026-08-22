@@ -1,4 +1,5 @@
 import os
+import base64
 import time
 from datetime import datetime, timedelta
 import urllib.parse
@@ -32,35 +33,45 @@ def send_telegram_alert(message):
 
 print("Connecting to Fyers API...")
 session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+})
 
-# 1. Send OTP Request
-r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp", json={"fy_id": FYERS_ID, "app_id": "2"}).json()
+# 1. Send OTP Request (Base64 Encoded FY_ID)
+encoded_fy_id = base64.b64encode(FYERS_ID.encode()).decode()
+r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json={"fy_id": encoded_fy_id, "app_id": "2"}).json()
+
 if "request_key" not in r1:
-    # Fallback to alternative payload
+    # Try alternate plain string payload
     r1 = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json={"fy_id": FYERS_ID, "app_id": "2"}).json()
 
 if "request_key" not in r1:
-    print(f"OTP Request Failed: {r1}")
+    print("OTP Request Failed:", r1)
     exit(1)
 
 # 2. Verify TOTP
 otp_val = pyotp.TOTP(TOTP_KEY).now()
 r2 = session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json={"request_key": r1["request_key"], "otp": str(otp_val)}).json()
 if "request_key" not in r2:
-    print(f"TOTP Verification Failed: {r2}")
+    print("TOTP Verification Failed:", r2)
     exit(1)
 
-# 3. Verify PIN
-r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": PIN}).json()
-if "data" not in r3 and "access_token" not in r3:
-    r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": PIN}).json()
-
+# 3. Verify PIN (Base64 Encoded PIN)
+encoded_pin = base64.b64encode(PIN.encode()).decode()
+r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": encoded_pin}).json()
 token_temp = r3.get("data", {}).get("token") or r3.get("data", {}).get("access_token") or r3.get("access_token")
+
 if not token_temp:
-    print(f"PIN Verification Failed: {r3}")
+    r3 = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json={"request_key": r2["request_key"], "identity_type": "pin", "identifier": PIN}).json()
+    token_temp = r3.get("data", {}).get("token") or r3.get("data", {}).get("access_token") or r3.get("access_token")
+
+if not token_temp:
+    print("PIN Verification Failed:", r3)
     exit(1)
 
-# 4. Generate Auth Code & Token
+# 4. Generate Auth Code & Access Token
 app_id_clean = APP_ID.split("-")[0] if "-" in APP_ID else APP_ID
 app_type = APP_ID.split("-")[1] if "-" in APP_ID else "100"
 
