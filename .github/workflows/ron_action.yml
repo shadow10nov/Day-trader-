@@ -1,0 +1,25 @@
+name: Ron Weasley Live Scanner
+
+on:
+  schedule:
+    # Runs Monday to Friday at 03:45 UTC (09:15 AM IST)
+    - cron: '45 3 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install yfinance pandas requests
+
+      - name: Run Ron Weasley Scanner
+        run: python ron_scanner.py
