@@ -12,14 +12,13 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TICKERS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
     "ITC.NS", "LT.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
-    "AXISBANK.NS", "TATAMOTORS.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
-    "BAJFINANCE.NS", "ASIANPAINT.NS", "HCLTECH.NS", "WIPRO.NS"
+    "AXISBANK.NS", "TATAMOTORS.NS", "MARUTI.NS", "SUNPHARMA.NS",
+    "TITAN.NS", "BAJFINANCE.NS", "ASIANPAINT.NS", "HCLTECH.NS", "WIPRO.NS"
 ]
 
 IST = pytz.timezone('Asia/Kolkata')
 START_TIME = time(9, 45)
 END_TIME = time(11, 30)
-
 alerted_today = set()
 
 def send_telegram_alert(message):
@@ -40,8 +39,11 @@ def fetch_yahoo_chart(ticker, interval="5m", range_str="5d"):
         data = res.json()['chart']['result'][0]
         quote = data['indicators']['quote'][0]
         df = pd.DataFrame({
-            'Open': quote['open'], 'High': quote['high'], 'Low': quote['low'],
-            'Close': quote['close'], 'Volume': quote['volume']
+            'Open': quote['open'],
+            'High': quote['high'],
+            'Low': quote['low'],
+            'Close': quote['close'],
+            'Volume': quote['volume']
         }, index=pd.to_datetime(data['timestamp'], unit='s', utc=True))
         df.index = df.index.tz_convert('Asia/Kolkata')
         df.dropna(inplace=True)
@@ -58,14 +60,15 @@ def scan_potter_setup():
         sym = ticker.replace(".NS", "")
         if sym in alerted_today:
             continue
-            
+
         intra = fetch_yahoo_chart(ticker, "5m", "5d")
         daily = fetch_yahoo_chart(ticker, "1d", "30d")
-        
+
         if intra.empty or daily.empty:
             continue
-            
-        daily['ATR14'] = (daily['High'] - daily['Low']).rolling(14).mean()
+
+        # ATR calculation (Fixed to Daily_ATR)
+        daily['Daily_ATR'] = (daily['High'] - daily['Low']).rolling(14).mean()
         daily['P'] = (daily['High'] + daily['Low'] + daily['Close']) / 3
         daily['BC'] = (daily['High'] + daily['Low']) / 2
         daily['TC'] = 2 * daily['P'] - daily['BC']
@@ -74,40 +77,43 @@ def scan_potter_setup():
         daily['CPR_Width'] = (daily['TC_real'] - daily['BC_real']).abs()
         daily['R2'] = daily['P'] + (daily['High'] - daily['Low'])
         daily['S2'] = daily['P'] - (daily['High'] - daily['Low'])
-        
+
         prev_day = daily.iloc[-2]
-        daily_atr = prev_day['Daily_ATR']
-        cpr_width = prev_day['CPR_Width']
         
-        if pd.isna(daily_atr) or pd.isna(cpr_width) or cpr_width >= (0.25 * daily_atr):
+        if 'Daily_ATR' not in prev_day or 'CPR_Width' not in prev_day:
             continue
             
+        daily_atr = prev_day['Daily_ATR']
+        cpr_width = prev_day['CPR_Width']
+
+        if pd.isna(daily_atr) or pd.isna(cpr_width) or cpr_width >= (0.25 * daily_atr):
+            continue
+
         pdh, pdl = prev_day['High'], prev_day['Low']
         tc, bc = prev_day['TC_real'], prev_day['BC_real']
         r2, s2 = prev_day['R2'], prev_day['S2']
-        
+
         intra['EMA20'] = intra['Close'].ewm(span=20, adjust=False).mean()
         intra['Vol_MA10'] = intra['Volume'].rolling(10).mean()
         intra['RVOL'] = intra['Volume'] / intra['Vol_MA10']
-        
         intra['TP'] = (intra['High'] + intra['Low'] + intra['Close']) / 3
         intra['TPV'] = intra['TP'] * intra['Volume']
         intra['Date_Only'] = intra.index.date
         intra['Cum_TPV'] = intra.groupby('Date_Only')['TPV'].cumsum()
         intra['Cum_Vol'] = intra.groupby('Date_Only')['Volume'].cumsum()
         intra['VWAP'] = intra['Cum_TPV'] / intra['Cum_Vol']
-        
+
         last = intra.iloc[-1]
         close, high, low, open_p = last['Close'], last['High'], last['Low'], last['Open']
         vwap, ema20, rvol = last['VWAP'], last['EMA20'], last['RVOL']
-        
+
         if close < 300:
             continue
-            
+
         candle_range = high - low
         is_solid = (candle_range > 0) and ((abs(close - open_p) / candle_range) >= 0.50)
         has_rvol = (not pd.isna(rvol)) and (rvol >= 1.25)
-        
+
         # BUY Setup
         if has_rvol and is_solid and (close > vwap) and (close > ema20):
             if (high > pdh) and (low <= pdh) and (close > pdh):
@@ -117,6 +123,7 @@ def scan_potter_setup():
                     target = round(max(r2, close + (2.5 * risk)), 2)
                     trail1 = round(close + (1.2 * risk), 2)
                     trail2 = round(close + (1.8 * risk), 2)
+
                     msg = (
                         f"🧙‍♂️ *Hey Potterhead, you have an opportunity!*\n\n"
                         f"🚨 *POTTER STRATEGY ALERT (BUY)* 🚨\n\n"
@@ -142,6 +149,7 @@ def scan_potter_setup():
                     target = round(min(s2, close - (2.5 * risk)), 2)
                     trail1 = round(close - (1.2 * risk), 2)
                     trail2 = round(close - (1.8 * risk), 2)
+
                     msg = (
                         f"🧙‍♂️ *Hey Potterhead, you have an opportunity!*\n\n"
                         f"🚨 *POTTER STRATEGY ALERT (SELL)* 🚨\n\n"
@@ -157,7 +165,7 @@ def scan_potter_setup():
                     )
                     send_telegram_alert(msg)
                     alerted_today.add(sym)
-                    
+
         t_module.sleep(0.3)
 
 if __name__ == "__main__":
