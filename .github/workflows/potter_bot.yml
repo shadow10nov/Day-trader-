@@ -2,13 +2,14 @@ name: Potter Strategy Live Telegram Alert
 
 on:
   schedule:
-    # 04:10 UTC = 09:40 AM IST (Monday to Friday)
-    - cron: '10 4 * * 1-5'
+    # 04:00 UTC = 09:30 AM IST (Monday to Friday)
+    - cron: '0 4 * * 1-5'
   workflow_dispatch:
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -19,10 +20,8 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install requests pandas numpy pytz
+        run: |
+          pip install requests pandas numpy pytz yfinance
 
       - name: Run Potter Live Bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python potter_telegram_bot.py
