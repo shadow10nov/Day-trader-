@@ -1,14 +1,17 @@
 import os
-import time as t_module
-from datetime import datetime, time
+import time
+from datetime import datetime, time as dt_time
 import pytz
+import yfinance as yf
 import requests
 import pandas as pd
 import numpy as np
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Credentials
+BOT_TOKEN = "8969458120:AAHPn7fb95a8wDDD4XYlpkLcIe5lWoXhumo"
+CHAT_ID = "8333484358"
 
+# 19 High-Beta Nifty Heavyweights Watchlist
 TICKERS = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
     "ITC.NS", "LT.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
@@ -17,39 +20,46 @@ TICKERS = [
 ]
 
 IST = pytz.timezone('Asia/Kolkata')
-START_TIME = time(9, 45)
-END_TIME = time(11, 30)
+START_TIME = dt_time(9, 30)
+END_TIME = dt_time(14, 0)
+
 alerted_today = set()
 
 def send_telegram_alert(message):
-    if not BOT_TOKEN or not CHAT_ID:
-        return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
     try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception:
-        pass
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"Telegram API Error: {res.text}")
+    except Exception as e:
+        print(f"Telegram Connection Error: {e}")
 
-def fetch_yahoo_chart(ticker, interval="5m", range_str="5d"):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval={interval}&range={range_str}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+def fetch_stock_data(ticker):
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()['chart']['result'][0]
-        quote = data['indicators']['quote'][0]
-        df = pd.DataFrame({
-            'Open': quote['open'],
-            'High': quote['high'],
-            'Low': quote['low'],
-            'Close': quote['close'],
-            'Volume': quote['volume']
-        }, index=pd.to_datetime(data['timestamp'], unit='s', utc=True))
-        df.index = df.index.tz_convert('Asia/Kolkata')
-        df.dropna(inplace=True)
-        return df
+        intra = yf.download(ticker, period="5d", interval="5m", progress=False)
+        daily = yf.download(ticker, period="1mo", interval="1d", progress=False)
+
+        if intra.empty or daily.empty:
+            return pd.DataFrame(), pd.DataFrame()
+
+        if isinstance(intra.columns, pd.MultiIndex):
+            intra.columns = intra.columns.get_level_values(0)
+        if isinstance(daily.columns, pd.MultiIndex):
+            daily.columns = daily.columns.get_level_values(0)
+
+        if intra.index.tz is None:
+            intra.index = intra.index.tz_localize('UTC').tz_convert(IST)
+        else:
+            intra.index = intra.index.tz_convert(IST)
+
+        return intra.dropna(), daily.dropna()
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
 def scan_potter_setup():
     now_ist = datetime.now(IST).time()
@@ -61,13 +71,11 @@ def scan_potter_setup():
         if sym in alerted_today:
             continue
 
-        intra = fetch_yahoo_chart(ticker, "5m", "5d")
-        daily = fetch_yahoo_chart(ticker, "1d", "30d")
-
-        if intra.empty or daily.empty:
+        intra, daily = fetch_stock_data(ticker)
+        if intra.empty or daily.empty or len(daily) < 15:
             continue
 
-        # ATR calculation (Fixed to Daily_ATR)
+        # CPR & Daily ATR Calculations
         daily['Daily_ATR'] = (daily['High'] - daily['Low']).rolling(14).mean()
         daily['P'] = (daily['High'] + daily['Low'] + daily['Close']) / 3
         daily['BC'] = (daily['High'] + daily['Low']) / 2
@@ -79,10 +87,9 @@ def scan_potter_setup():
         daily['S2'] = daily['P'] - (daily['High'] - daily['Low'])
 
         prev_day = daily.iloc[-2]
-        
         if 'Daily_ATR' not in prev_day or 'CPR_Width' not in prev_day:
             continue
-            
+
         daily_atr = prev_day['Daily_ATR']
         cpr_width = prev_day['CPR_Width']
 
@@ -93,6 +100,7 @@ def scan_potter_setup():
         tc, bc = prev_day['TC_real'], prev_day['BC_real']
         r2, s2 = prev_day['R2'], prev_day['S2']
 
+        # Intraday VWAP, EMA20 & RVOL Calculations
         intra['EMA20'] = intra['Close'].ewm(span=20, adjust=False).mean()
         intra['Vol_MA10'] = intra['Volume'].rolling(10).mean()
         intra['RVOL'] = intra['Volume'] / intra['Vol_MA10']
@@ -133,7 +141,7 @@ def scan_potter_setup():
                         f"🎯 *Final Target (1:2.5 RR):* ₹{target:.2f}\n"
                         f"🔄 *Trailing Target 1 (Breakeven @ 1:1.2 RR):* ₹{trail1:.2f} -> SL to Cost\n"
                         f"🔒 *Trailing Target 2 (Lock 1:1 @ 1:1.8 RR):* ₹{trail2:.2f} -> SL to ₹{close + risk:.2f}\n"
-                        f"🛑 *Hard EOD Exit Time:* 02:55 PM IST\n\n"
+                        f"🛑 *Hard EOD Exit Time:* 02:00 PM IST\n\n"
                         f"📊 *RVOL:* {rvol:.2f}x | CPR: Narrow\n"
                         f"⏰ *Time:* {datetime.now(IST).strftime('%H:%M:%S IST')}"
                     )
@@ -159,21 +167,25 @@ def scan_potter_setup():
                         f"🎯 *Final Target (1:2.5 RR):* ₹{target:.2f}\n"
                         f"🔄 *Trailing Target 1 (Breakeven @ 1:1.2 RR):* ₹{trail1:.2f} -> SL to Cost\n"
                         f"🔒 *Trailing Target 2 (Lock 1:1 @ 1:1.8 RR):* ₹{trail2:.2f} -> SL to ₹{close - risk:.2f}\n"
-                        f"🛑 *Hard EOD Exit Time:* 02:55 PM IST\n\n"
+                        f"🛑 *Hard EOD Exit Time:* 02:00 PM IST\n\n"
                         f"📊 *RVOL:* {rvol:.2f}x | CPR: Narrow\n"
                         f"⏰ *Time:* {datetime.now(IST).strftime('%H:%M:%S IST')}"
                     )
                     send_telegram_alert(msg)
                     alerted_today.add(sym)
 
-        t_module.sleep(0.3)
+        time.sleep(0.3)
 
 if __name__ == "__main__":
     send_telegram_alert("🚀 *Potter Cloud Scanner Online & Monitoring Nifty Basket...*")
     while True:
-        now_time = datetime.now(IST).time()
-        if now_time > time(11, 35):
-            send_telegram_alert("🛑 *Scanning Window Closed (11:35 AM). Potter Bot going offline.*")
-            break
-        scan_potter_setup()
-        t_module.sleep(60)
+        try:
+            now_time = datetime.now(IST).time()
+            if now_time > dt_time(14, 0):
+                send_telegram_alert("🛑 *Scanning Window Closed (02:00 PM). Potter Bot going offline.*")
+                break
+            scan_potter_setup()
+        except Exception:
+            continue
+
+        time.sleep(60)
