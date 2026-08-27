@@ -13,8 +13,9 @@ warnings.filterwarnings('ignore')
 # ==========================================================
 # CONFIGURATION - TELEGRAM & RISK PARAMETERS
 # ==========================================================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8969458120:AAHPn7fb95a8wDDD4XYlpkLcIe5lWoXhumo")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8333484358")
+# Apne system/server environment variables me TELEGRAM_BOT_TOKEN aur TELEGRAM_CHAT_ID set karein
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CAPITAL = 20000.0
 RISK_PER_TRADE = 400.0  # Fixed 2% Risk
 
@@ -27,6 +28,9 @@ WATCHLIST = [
 IST = pytz.timezone('Asia/Kolkata')
 
 def send_telegram_msg(message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram configuration missing. Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.")
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -213,14 +217,9 @@ while True:
                         f"🚀 <i>Status: Risk-free position. Remaining 50% trailing towards Target 2 (₹{tr['t2']:.2f}).</i>"
                     )
                     send_telegram_msg(msg)
-       
-
-
 
         except Exception:
             continue
 
     # 60-Second Realtime Sleep Interval
     time.sleep(60)
-
-
