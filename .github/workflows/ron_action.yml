@@ -23,6 +23,6 @@ jobs:
 
       - name: Run Ron Weasley Scanner
         env:
-          TELEGRAM_BOT_TOKEN: "8969458120:AAHPn7fb95a8wDDD4XYlpkLcIe5lWoXhumo"
-          TELEGRAM_CHAT_ID: "8333484358"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -u ron_scanner.py
