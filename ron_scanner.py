@@ -1,225 +1,263 @@
 import os
 import time
-import math
-import requests
 import datetime
 import pytz
 import yfinance as yf
 import pandas as pd
-import warnings
+import requests
 
-warnings.filterwarnings('ignore')
+# ----------------- CONFIGURATION & CONSTANTS -----------------
+IST = pytz.timezone('Asia/Kolkata')
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+RISK_AMOUNT = 400.0  # Fixed ₹400 risk per trade
 
-# ==========================================================
-# CONFIGURATION - TELEGRAM & RISK PARAMETERS
-# ==========================================================
-# Apne system/server environment variables me TELEGRAM_BOT_TOKEN aur TELEGRAM_CHAT_ID set karein
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-CAPITAL = 20000.0
-RISK_PER_TRADE = 400.0  # Fixed 2% Risk
-
+# Top Liquid Indian Stocks for Intraday Breakouts
 WATCHLIST = [
-    "TRENT.NS", "DIXON.NS", "SHRIRAMFIN.NS", "POLYCAB.NS",
-    "BHARATFORG.NS", "M&M.NS", "BEL.NS", "ADANIENT.NS",
-    "VOLTAS.NS", "CHOLAFIN.NS", "JSWSTEEL.NS", "BAJFINANCE.NS", "PERSISTENT.NS"
+    "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "TCS.NS",
+    "BHARATFORG.NS", "SBIN.NS", "TATAMOTORS.NS", "AXISBANK.NS", "KOTAKBANK.NS",
+    "LT.NS", "BAJFINANCE.NS", "MARUTI.NS", "SUNPHARMA.NS", "ITC.NS"
 ]
 
-IST = pytz.timezone('Asia/Kolkata')
+INDEX_TICKER = "^NSEI"
 
-def send_telegram_msg(message: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram configuration missing. Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.")
+# State tracking to avoid duplicate alerts
+radar_triggered = set()
+execution_triggered = set()
+target1_achieved = set()
+active_trades = {}  # Store trade details: {sym: {'type': 'LONG'/'SHORT', 'entry': price, 't1': t1, 'sl': sl}}
+
+# ----------------- HELPER FUNCTIONS -----------------
+def send_telegram_msg(msg: str):
+    """Send formatted markdown message to Telegram."""
+    if not BOT_TOKEN or not CHAT_ID:
+        print("Telegram tokens not configured!")
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
+        "chat_id": CHAT_ID,
+        "text": msg,
+        "parse_mode": "Markdown"
     }
     try:
-        requests.post(url, json=payload, timeout=8)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Telegram Delivery Error: {e}")
+        print(f"Error sending Telegram message: {e}")
 
-radar_sent = {}
-executed_trades = {}
-
-print("🚀 Ron Weasley Strategy Scanner Active. Monitoring High-Beta Momentum Basket...")
-send_telegram_msg("🟢 <b>Ron Weasley System Activated</b>\nReal-time monitoring online for Narrow CPR + PDH/PDL breakouts (09:15 AM - 03:15 PM IST).")
-
-def get_daily_levels():
-    levels = {}
-    for sym in WATCHLIST:
-        try:
-            df = yf.download(sym, period="5d", interval="1d", progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            if len(df) < 2:
-                continue
-            prev = df.iloc[-2]
-            pivot = (prev["High"] + prev["Low"] + prev["Close"]) / 3.0
-            bc = (prev["High"] + prev["Low"]) / 2.0
-            tc = (pivot - bc) + pivot
-            cpr_width = (abs(tc - bc) / prev["Close"]) * 100
-            levels[sym] = {
-                "PDH": float(prev["High"]),
-                "PDL": float(prev["Low"]),
-                "Top_CPR": max(tc, bc),
-                "Bottom_CPR": min(tc, bc),
-                "CPR_Width": float(cpr_width),
-                "Narrow": cpr_width <= 0.38
-            }
-        except Exception:
-            continue
-    return levels
-
-daily_levels = get_daily_levels()
-
-# ==========================================================
-# LIVE SCANNING LOOP (09:15 AM - 03:15 PM IST)
-# ==========================================================
-while True:
-    now_ist = datetime.datetime.now(IST)
-    curr_min = now_ist.hour * 60 + now_ist.minute
-
-    # Market Timings: 09:15 AM (555 mins) to 03:15 PM (915 mins) IST
-    if not (555 <= curr_min <= 915):
-        time.sleep(60)
-        continue
-
-    # Nifty 50 Trend Filter
+def get_cpr_and_levels(ticker_symbol: str):
+    """Calculate PDH, PDL, Pivot, BC, TC and CPR width from daily data."""
     try:
-        nifty = yf.download("^NSEI", period="1d", interval="5m", progress=False)
-        if isinstance(nifty.columns, pd.MultiIndex):
-            nifty.columns = nifty.columns.get_level_values(0)
-        nifty_open = float(nifty.iloc[0]["Open"])
-        nifty_curr = float(nifty.iloc[-1]["Close"])
-        nifty_bullish = nifty_curr >= nifty_open
+        t = yf.Ticker(ticker_symbol)
+        df_daily = t.history(period="5d", interval="1d")
+        if len(df_daily) < 2:
+            return None
+        prev_day = df_daily.iloc[-2]
+        high = prev_day['High']
+        low = prev_day['Low']
+        close = prev_day['Close']
+        
+        pivot = (high + low + close) / 3.0
+        bc = (high + low) / 2.0
+        tc = (pivot - bc) + pivot
+        
+        cpr_width = abs(tc - bc) / close * 100.0
+        return {
+            "pdh": high,
+            "pdl": low,
+            "cpr_width": cpr_width,
+            "is_narrow": cpr_width <= 0.38
+        }
     except Exception:
-        nifty_bullish = True
+        return None
 
+def get_intraday_data(ticker_symbol: str):
+    """Fetch 5-minute intraday candle data and calculate VWAP."""
+    try:
+        t = yf.Ticker(ticker_symbol)
+        df = t.history(period="1d", interval="5m")
+        if df.empty or len(df) < 2:
+            return None
+        
+        # Calculate intraday VWAP
+        df['Typical_Price'] = (df['High'] + df['Low'] + df['Close']) / 3.0
+        df['Vol_Price'] = df['Typical_Price'] * df['Volume']
+        df['Cum_Vol_Price'] = df['Vol_Price'].cumsum()
+        df['Cum_Vol'] = df['Volume'].cumsum()
+        df['VWAP'] = df['Cum_Vol_Price'] / df['Cum_Vol']
+        
+        current_candle = df.iloc[-1]
+        prev_candle = df.iloc[-2]
+        
+        return {
+            "close": current_candle['Close'],
+            "high": current_candle['High'],
+            "low": current_candle['Low'],
+            "vwap": current_candle['VWAP'],
+            "prev_close": prev_candle['Close']
+        }
+    except Exception:
+        return None
+
+def get_nifty_trend():
+    """Determine Nifty intraday trend against VWAP."""
+    data = get_intraday_data(INDEX_TICKER)
+    if not data:
+        return "NEUTRAL"
+    if data['close'] > data['vwap']:
+        return "BULLISH"
+    elif data['close'] < data['vwap']:
+        return "BEARISH"
+    return "NEUTRAL"
+
+# ----------------- MAIN ENGINE -----------------
+def main():
+    print("Initializing Ron Weasley System...")
+    startup_msg = (
+        "🟢 *Ron Weasley System Activated*\n"
+        "Real-time monitoring online for Narrow CPR + PDH/PDL breakouts (09:15 AM - 03:15 PM IST)."
+    )
+    send_telegram_msg(startup_msg)
+
+    # Pre-calculate Daily Levels & Narrow CPR Filter
+    cpr_cache = {}
     for sym in WATCHLIST:
-        stock_name = sym.replace(".NS", "")
-        if sym not in daily_levels or not daily_levels[sym]["Narrow"]:
+        levels = get_cpr_and_levels(sym)
+        if levels:
+            cpr_cache[sym] = levels
+            print(f"[{sym}] Narrow CPR: {levels['is_narrow']} (Width: {levels['cpr_width']:.2f}%)")
+
+    while True:
+        now = datetime.datetime.now(IST)
+        curr_min = now.hour * 60 + now.minute
+
+        # 1. Clean Exit after Market Close (03:15 PM IST = 915 mins)
+        if curr_min > 915:
+            print("Market closed (03:15 PM IST). Exiting scanner cleanly.")
+            send_telegram_msg("🔴 *Ron Weasley System Closed* for the trading session.")
+            break
+
+        # 2. Wait if before Market Opening (09:15 AM IST = 555 mins)
+        if curr_min < 555:
+            print("Waiting for market opening (09:15 AM IST)...")
+            time.sleep(30)
             continue
 
-        lvl = daily_levels[sym]
-        pdh = lvl["PDH"]
-        pdl = lvl["PDL"]
+        nifty_trend = get_nifty_trend()
 
-        try:
-            df_5m = yf.download(sym, period="1d", interval="5m", progress=False)
-            if isinstance(df_5m.columns, pd.MultiIndex):
-                df_5m.columns = df_5m.columns.get_level_values(0)
-            if len(df_5m) < 4:
+        for sym in WATCHLIST:
+            stock_name = sym.replace(".NS", "")
+            levels = cpr_cache.get(sym)
+            if not levels or not levels['is_narrow']:
                 continue
 
-            curr_price = float(df_5m.iloc[-1]["Close"])
-            curr_high = float(df_5m.iloc[-1]["High"])
-            curr_low = float(df_5m.iloc[-1]["Low"])
+            intra = get_intraday_data(sym)
+            if not intra:
+                continue
 
-            # Cumulative VWAP calculation
-            df_5m["TP"] = (df_5m["High"] + df_5m["Low"] + df_5m["Close"]) / 3.0
-            vwap = (df_5m["TP"] * df_5m["Volume"]).cumsum() / (df_5m["Volume"].cumsum() + 1e-9)
-            curr_vwap = float(vwap.iloc[-1])
+            price = intra['close']
+            vwap = intra['vwap']
+            pdh = levels['pdh']
+            pdl = levels['pdl']
 
-            # --------------------------------------------------
-            # ALERT 1: PRE-BREAKOUT RADAR (09:45 AM - 02:45 PM IST)
-            # --------------------------------------------------
-            if sym not in radar_sent and (585 <= curr_min <= 885):
-                if (0 < (pdh - curr_price) <= pdh * 0.0025) and nifty_bullish:
-                    msg = (
-                        f"⚠️ <b>RON WEASLEY RADAR: PRE-BREAKOUT WATCH</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📈 <b>Stock:</b> {stock_name}\n"
-                        f"🎯 <b>PDH Level:</b> ₹{pdh:.2f}\n"
-                        f"⚡ <b>Current Price:</b> ₹{curr_price:.2f} (Approaching PDH)\n"
-                        f"📊 <b>Market Context:</b> Nifty 50 Bullish | CPR: Narrow ({lvl['CPR_Width']:.2f}%)\n"
-                        f"👉 <i>Action: Keep chart ready for breakout confirmation.</i>"
-                    )
-                    send_telegram_msg(msg)
-                    radar_sent[sym] = "BUY_ALERTED"
-                elif (0 < (curr_price - pdl) <= pdl * 0.0025) and not nifty_bullish:
-                    msg = (
-                        f"⚠️ <b>RON WEASLEY RADAR: PRE-BREAKDOWN WATCH</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📉 <b>Stock:</b> {stock_name}\n"
-                        f"🎯 <b>PDL Level:</b> ₹{pdl:.2f}\n"
-                        f"⚡ <b>Current Price:</b> ₹{curr_price:.2f} (Approaching PDL)\n"
-                        f"📊 <b>Market Context:</b> Nifty 50 Bearish | CPR: Narrow ({lvl['CPR_Width']:.2f}%)\n"
-                        f"👉 <i>Action: Keep chart ready for breakdown confirmation.</i>"
-                    )
-                    send_telegram_msg(msg)
-                    radar_sent[sym] = "SELL_ALERTED"
-
-            # --------------------------------------------------
-            # ALERT 2: CONFIRMED EXECUTION (10:00 AM - 02:45 PM IST)
-            # --------------------------------------------------
-            if sym not in executed_trades and (600 <= curr_min <= 885):
-                # LONG TRIGGER
-                if curr_price > pdh and curr_price > curr_vwap and nifty_bullish:
-                    prev_low = float(df_5m.iloc[-2]["Low"])
-                    sl_price = round(min(prev_low, lvl["Bottom_CPR"]), 2)
-                    sl_dist = round(curr_price - sl_price, 2)
-                    if sl_dist >= (curr_price * 0.0035):
-                        qty = math.floor(RISK_PER_TRADE / sl_dist)
-                        t1 = round(curr_price + (sl_dist * 1.0), 2)
-                        t2 = round(curr_price + (sl_dist * 2.0), 2)
-                        msg = (
-                            f"🚀 <b>RON WEASLEY EXECUTION: BUY TRIGGERED</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🔹 <b>Stock:</b> {stock_name} (LONG)\n"
-                            f"💵 <b>Entry Price:</b> ₹{curr_price:.2f}\n"
-                            f"🛑 <b>Initial Stop-Loss:</b> ₹{sl_price:.2f} (Risk Distance: ₹{sl_dist:.2f})\n"
-                            f"📦 <b>Position Size:</b> {qty} Shares (₹{RISK_PER_TRADE:.0f} Fixed Risk)\n"
-                            f"🎯 <b>Target 1 (+1.0R):</b> ₹{t1:.2f} (Book 50% Quantity)\n"
-                            f"🎯 <b>Target 2 (+2.0R):</b> ₹{t2:.2f} (Final Target for Remaining 50%)"
+            # ----------------- 1. PRE-BREAKOUT RADAR ALERT (09:45 AM - 02:45 PM) -----------------
+            if 585 <= curr_min <= 885:
+                # Bullish radar (within 0.25% of PDH)
+                if 0 <= (pdh - price) / pdh <= 0.0025 and nifty_trend == "BULLISH":
+                    if f"{sym}_RADAR_LONG" not in radar_triggered:
+                        radar_msg = (
+                            f"📡 *PRE-BREAKOUT RADAR: LONG WATCH*\n"
+                            f"🔹 *Stock:* {stock_name}\n"
+                            f"💵 *Current Price:* ₹{price:.2f}\n"
+                            f"🎯 *PDH Level:* ₹{pdh:.2f} (Within 0.25%)\n"
+                            f"📊 *VWAP:* ₹{vwap:.2f}\n"
+                            f"📈 *Nifty Trend:* BULLISH\n"
+                            f"⚡ *Action:* Get chart ready for 5m breakout."
                         )
-                        send_telegram_msg(msg)
-                        executed_trades[sym] = {"type": "BUY", "entry": curr_price, "sl": sl_price, "t1": t1, "t2": t2, "qty": qty, "p1_done": False}
+                        send_telegram_msg(radar_msg)
+                        radar_triggered.add(f"{sym}_RADAR_LONG")
 
-                # SHORT TRIGGER
-                elif curr_price < pdl and curr_price < curr_vwap and not nifty_bullish:
-                    prev_high = float(df_5m.iloc[-2]["High"])
-                    sl_price = round(max(prev_high, lvl["Top_CPR"]), 2)
-                    sl_dist = round(sl_price - curr_price, 2)
-                    if sl_dist >= (curr_price * 0.0035):
-                        qty = math.floor(RISK_PER_TRADE / sl_dist)
-                        t1 = round(curr_price - (sl_dist * 1.0), 2)
-                        t2 = round(curr_price - (sl_dist * 2.0), 2)
-                        msg = (
-                            f"🚀 <b>RON WEASLEY EXECUTION: SELL TRIGGERED</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"🔹 <b>Stock:</b> {stock_name} (SHORT)\n"
-                            f"💵 <b>Entry Price:</b> ₹{curr_price:.2f}\n"
-                            f"🛑 <b>Initial Stop-Loss:</b> ₹{sl_price:.2f} (Risk Distance: ₹{sl_dist:.2f})\n"
-                            f"📦 <b>Position Size:</b> {qty} Shares (₹{RISK_PER_TRADE:.0f} Fixed Risk)\n"
-                            f"🎯 <b>Target 1 (+1.0R):</b> ₹{t1:.2f} (Book 50% Quantity)\n"
-                            f"🎯 <b>Target 2 (+2.0R):</b> ₹{t2:.2f} (Final Target for Remaining 50%)"
+                # Bearish radar (within 0.25% of PDL)
+                if 0 <= (price - pdl) / pdl <= 0.0025 and nifty_trend == "BEARISH":
+                    if f"{sym}_RADAR_SHORT" not in radar_triggered:
+                        radar_msg = (
+                            f"📡 *PRE-BREAKOUT RADAR: SHORT WATCH*\n"
+                            f"🔹 *Stock:* {stock_name}\n"
+                            f"💵 *Current Price:* ₹{price:.2f}\n"
+                            f"🎯 *PDL Level:* ₹{pdl:.2f} (Within 0.25%)\n"
+                            f"📊 *VWAP:* ₹{vwap:.2f}\n"
+                            f"📉 *Nifty Trend:* BEARISH\n"
+                            f"⚡ *Action:* Get chart ready for 5m breakdown."
                         )
-                        send_telegram_msg(msg)
-                        executed_trades[sym] = {"type": "SELL", "entry": curr_price, "sl": sl_price, "t1": t1, "t2": t2, "qty": qty, "p1_done": False}
+                        send_telegram_msg(radar_msg)
+                        radar_triggered.add(f"{sym}_RADAR_SHORT")
 
-            # --------------------------------------------------
-            # ALERT 3: TARGET 1 ACHIEVED (+1.0R)
-            # --------------------------------------------------
-            if sym in executed_trades and not executed_trades[sym]["p1_done"]:
-                tr = executed_trades[sym]
-                if (tr["type"] == "BUY" and curr_high >= tr["t1"]) or (tr["type"] == "SELL" and curr_low <= tr["t1"]):
-                    tr["p1_done"] = True
-                    msg = (
-                        f"🎯 <b>RON WEASLEY UPDATE: TARGET 1 (+1.0R) ACHIEVED</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"🔹 <b>Stock:</b> {stock_name}\n"
-                        f"✅ <b>Action 1:</b> Book 50% profit ({math.floor(tr['qty']/2)} Shares).\n"
-                        f"🔒 <b>Action 2:</b> Move Stop-Loss to <b>Entry Price (₹{tr['entry']:.2f})</b>.\n"
-                        f"🚀 <i>Status: Risk-free position. Remaining 50% trailing towards Target 2 (₹{tr['t2']:.2f}).</i>"
+            # ----------------- 2. CONFIRMED EXECUTION ALERT (10:00 AM - 02:45 PM) -----------------
+            if 600 <= curr_min <= 885:
+                # BUY TRIGGER: Price > PDH + Price > VWAP + Nifty Bullish
+                if price > pdh and price > vwap and nifty_trend == "BULLISH":
+                    if f"{sym}_EXEC_LONG" not in execution_triggered:
+                        sl = min(vwap, intra['low'])
+                        risk_dist = max(price - sl, price * 0.002)
+                        qty = max(1, int(RISK_AMOUNT / risk_dist))
+                        t1 = price + (1.0 * risk_dist)
+                        t2 = price + (2.0 * risk_dist)
+
+                        exec_msg = (
+                            f"🚀 *RON WEASLEY EXECUTION: BUY TRIGGERED*\n"
+                            f"🔹 *Stock:* {stock_name} (LONG)\n"
+                            f"💵 *Entry Price:* ₹{price:.2f}\n"
+                            f"🛑 *Initial Stop-Loss:* ₹{sl:.2f} (Risk: ₹{risk_dist:.2f})\n"
+                            f"📦 *Position Size:* {qty} Shares (₹400 Fixed Risk)\n"
+                            f"🎯 *Target 1 (+1.0R):* ₹{t1:.2f} (Book 50% Quantity)\n"
+                            f"🎯 *Target 2 (+2.0R):* ₹{t2:.2f} (Final Target)"
+                        )
+                        send_telegram_msg(exec_msg)
+                        execution_triggered.add(f"{sym}_EXEC_LONG")
+                        active_trades[sym] = {'type': 'LONG', 'entry': price, 't1': t1, 'sl': sl}
+
+                # SELL TRIGGER: Price < PDL + Price < VWAP + Nifty Bearish
+                if price < pdl and price < vwap and nifty_trend == "BEARISH":
+                    if f"{sym}_EXEC_SHORT" not in execution_triggered:
+                        sl = max(vwap, intra['high'])
+                        risk_dist = max(sl - price, price * 0.002)
+                        qty = max(1, int(RISK_AMOUNT / risk_dist))
+                        t1 = price - (1.0 * risk_dist)
+                        t2 = price - (2.0 * risk_dist)
+
+                        exec_msg = (
+                            f"🚀 *RON WEASLEY EXECUTION: SELL TRIGGERED*\n"
+                            f"🔹 *Stock:* {stock_name} (SHORT)\n"
+                            f"💵 *Entry Price:* ₹{price:.2f}\n"
+                            f"🛑 *Initial Stop-Loss:* ₹{sl:.2f} (Risk: ₹{risk_dist:.2f})\n"
+                            f"📦 *Position Size:* {qty} Shares (₹400 Fixed Risk)\n"
+                            f"🎯 *Target 1 (+1.0R):* ₹{t1:.2f} (Book 50% Quantity)\n"
+                            f"🎯 *Target 2 (+2.0R):* ₹{t2:.2f} (Final Target)"
+                        )
+                        send_telegram_msg(exec_msg)
+                        execution_triggered.add(f"{sym}_EXEC_SHORT")
+                        active_trades[sym] = {'type': 'SHORT', 'entry': price, 't1': t1, 'sl': sl}
+
+            # ----------------- 3. TARGET 1 (+1.0R) HIT & TRAIL SL ALERT -----------------
+            if sym in active_trades and sym not in target1_achieved:
+                trade = active_trades[sym]
+                t1_hit = False
+                if trade['type'] == 'LONG' and price >= trade['t1']:
+                    t1_hit = True
+                elif trade['type'] == 'SHORT' and price <= trade['t1']:
+                    t1_hit = True
+
+                if t1_hit:
+                    trail_msg = (
+                        f"🎯 *TARGET 1 (+1.0R) ACHIEVED: {stock_name}*\n"
+                        f"✅ *Action 1:* Book 50% Profit at ₹{price:.2f}\n"
+                        f"🔒 *Action 2:* Move Stop-Loss to Cost (₹{trade['entry']:.2f})\n"
+                        f"🚀 *Status:* Trade is now 100% Risk-Free. Let remaining 50% ride till Target 2."
                     )
-                    send_telegram_msg(msg)
+                    send_telegram_msg(trail_msg)
+                    target1_achieved.add(sym)
 
-        except Exception:
-            continue
+        # Sleep between scans (60 seconds)
+        time.sleep(60)
 
-    # 60-Second Realtime Sleep Interval
-    time.sleep(60)
+if __name__ == "__main__":
+    main()
