@@ -20,7 +20,7 @@ WATCHLIST = [
     "DLF.NS", "HINDALCO.NS", "RELIANCE.NS"
 ]
 
-INDEX_TICKER = "^NSEI"
+INDEX_TICKER = "NIFTYBEES.NS"  # Highly liquid ETF with live volume for flawless VWAP
 
 # State tracking to avoid duplicate alerts and manage lifecycle
 radar_triggered = set()
@@ -45,13 +45,22 @@ def send_telegram_msg(msg: str):
         print(f"Error sending Telegram message: {e}")
 
 def get_cpr_and_levels(ticker_symbol: str):
-    """Calculate PDH, PDL, Pivot, BC, TC and CPR width from daily data."""
+    """Calculate PDH, PDL, Pivot, BC, TC accurately by filtering completed prior trading day."""
     try:
         t = yf.Ticker(ticker_symbol)
-        df_daily = t.history(period="5d", interval="1d")
-        if len(df_daily) < 2:
+        df_daily = t.history(period="10d", interval="1d")
+        if df_daily.empty or len(df_daily) < 2:
             return None
-        prev_day = df_daily.iloc[-2]
+        
+        today_date = datetime.datetime.now(IST).date()
+        
+        # Filter out current running day's incomplete bar if present
+        completed_days = df_daily[df_daily.index.date < today_date]
+        if completed_days.empty:
+            prev_day = df_daily.iloc[-2]
+        else:
+            prev_day = completed_days.iloc[-1]
+            
         high = float(prev_day['High'])
         low = float(prev_day['Low'])
         close = float(prev_day['Close'])
@@ -83,7 +92,9 @@ def get_intraday_data(ticker_symbol: str):
         df['Vol_Price'] = df['Typical_Price'] * df['Volume']
         df['Cum_Vol_Price'] = df['Vol_Price'].cumsum()
         df['Cum_Vol'] = df['Volume'].cumsum()
-        df['VWAP'] = df['Cum_Vol_Price'] / df['Cum_Vol']
+        
+        df['VWAP'] = df['Cum_Vol_Price'] / df['Cum_Vol'].replace(0, pd.NA)
+        df['VWAP'] = df['VWAP'].bfill().ffill()
         
         current_candle = df.iloc[-1]   # Running candle (Live price)
         completed_candle = df.iloc[-2] # Completed 5m candle (Confirmed breakout)
@@ -102,7 +113,7 @@ def get_intraday_data(ticker_symbol: str):
         return None
 
 def get_nifty_trend():
-    """Determine Nifty intraday trend against closed candle VWAP."""
+    """Determine Nifty intraday trend using NIFTYBEES real-volume VWAP."""
     data = get_intraday_data(INDEX_TICKER)
     if not data:
         return "NEUTRAL"
