@@ -20,7 +20,7 @@ WATCHLIST = [
     "DLF.NS", "HINDALCO.NS", "RELIANCE.NS"
 ]
 
-INDEX_TICKER = "NIFTYBEES.NS"  # Highly liquid ETF with live volume for flawless VWAP
+INDEX_TICKER = "NIFTYBEES.NS"  # Liquid ETF with live volume for flawless VWAP
 
 # State tracking to avoid duplicate alerts and manage lifecycle
 radar_triggered = set()
@@ -45,22 +45,30 @@ def send_telegram_msg(msg: str):
         print(f"Error sending Telegram message: {e}")
 
 def get_cpr_and_levels(ticker_symbol: str):
-    """Calculate PDH, PDL, Pivot, BC, TC accurately by filtering completed prior trading day."""
+    """Calculate PDH, PDL, Pivot, BC, TC accurately by strictly taking yesterday's completed day."""
     try:
         t = yf.Ticker(ticker_symbol)
         df_daily = t.history(period="10d", interval="1d")
-        if df_daily.empty or len(df_daily) < 2:
+        if df_daily.empty:
             return None
         
         today_date = datetime.datetime.now(IST).date()
         
-        # Filter out current running day's incomplete bar if present
-        completed_days = df_daily[df_daily.index.date < today_date]
-        if completed_days.empty:
-            prev_day = df_daily.iloc[-2]
+        # Convert index to IST calendar date
+        if df_daily.index.tz is not None:
+            dates = df_daily.index.tz_convert(IST).date
         else:
-            prev_day = completed_days.iloc[-1]
+            dates = df_daily.index.date
+        df_daily['date_ist'] = dates
+        
+        # Filter out today's incomplete candle
+        completed_days = df_daily[df_daily['date_ist'] < today_date]
+        if completed_days.empty:
+            return None
             
+        # Last completed row is ALWAYS strictly the prior trading day
+        prev_day = completed_days.iloc[-1]
+        
         high = float(prev_day['High'])
         low = float(prev_day['Low'])
         close = float(prev_day['Close'])
@@ -76,7 +84,8 @@ def get_cpr_and_levels(ticker_symbol: str):
             "cpr_width": cpr_width,
             "is_narrow": cpr_width <= 0.38
         }
-    except Exception:
+    except Exception as e:
+        print(f"Error in levels calculation for {ticker_symbol}: {e}")
         return None
 
 def get_intraday_data(ticker_symbol: str):
@@ -96,8 +105,8 @@ def get_intraday_data(ticker_symbol: str):
         df['VWAP'] = df['Cum_Vol_Price'] / df['Cum_Vol'].replace(0, pd.NA)
         df['VWAP'] = df['VWAP'].bfill().ffill()
         
-        current_candle = df.iloc[-1]   # Running candle (Live price)
-        completed_candle = df.iloc[-2] # Completed 5m candle (Confirmed breakout)
+        current_candle = df.iloc[-1]   # Running candle (Live price for Radar & Target tracking)
+        completed_candle = df.iloc[-2] # Completed 5m candle (Confirmed breakout trigger)
         
         return {
             "live_price": float(current_candle['Close']),
